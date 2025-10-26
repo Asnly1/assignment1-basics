@@ -9,98 +9,97 @@ def train_bpe(
     
     PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     
-    with (input_path, "rb") as f: # read binary
+    with open(input_path, "rb") as f: # read binary
         num_processes = 4
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
         
         # int : bytes
-        vocab: dict[int, bytes] = {i : str(i).encode("utf-8") for i in range(256)}
-        vocab_bytes_to_int: dict[bytes, int] = {str(i).encode("utf-8") : i for i in range(256)}
+        vocab: dict[int, bytes] = {i : bytes([i]) for i in range(256)}
+        vocab_bytes_to_int: dict[bytes, int] = {bytes([i]) : i for i in range(256)}
         merges: list[tuple[bytes, bytes]] = []
         
-        # (chunk_id, word, bytes_pair) : counts
-        cache: dict[tuple[int, list[int], tuple[bytes, bytes]], int]= dict()
+        for i, special_token in enumerate(special_tokens):
+            vocab[i+256] = special_token.encode("utf-8")
+            vocab_bytes_to_int[special_token.encode("utf-8")] = i+256
+        
+        word_count: dict[tuple[int, ...], int] = dict()
         
         # Pre-tokenization
-        chunk_id = 0
         for start, end in zip(boundaries[:-1], boundaries[1:]): # todo: parallelize
             f.seek(start)
             chunk = f.read(end - start).decode("utf-8", errors="ignore")
             
             for word in re.finditer(PAT, chunk):
-                word: list[int] = list(word)
-                for byte_id in len(word):
-                    if (chunk_id, word, (word(byte_id), word(byte_id+1))) in cache.keys:
-                        cache[(chunk_id, word, (word(byte_id), word(byte_id+1)))] += 1
-                    else:
-                        cache[(chunk_id, word, (word(byte_id), word(byte_id+1)))] = 1
+                word_bytes: tuple[int, ...] = tuple(word.group(0).encode("utf-8"))
+                word_count[word_bytes] = word_count.get(word_bytes, 0) + 1
                 
-            chunk_id += 1
+        # Get initial bytes_pair count
+        
+        bytes_pair_count: dict[tuple[int, int], int] = get_bytes_pair_count(word_count)
             
         # Train Tokenizer
-        for i in range(vocab_size - 256):
-            bytes_pairs_with_count = count_bytes_pairs(cache)
-            most_frequent_bytes_pair = get_most_frequent_bytes_pairs(bytes_pairs_with_count)
-            vocab[i+256] = most_frequent_bytes_pair
-            vocab_bytes_to_int[most_frequent_bytes_pair] = i + 256
-            merges.append(most_frequent_bytes_pair)
+        special_tokens_length = len(special_tokens)
+        num_merge = vocab_size - 256 - special_tokens_length
+        
+        for i in range(num_merge):
+            most_frequent_pair: tuple[int, int] = get_most_frequent_pair(bytes_pair_count, vocab)
             
-            for _, word, bytes_pair in cache:
-                word_need_to_recount: set[list[int]] = set()
-                if bytes_pair == most_frequent_bytes_pair:
-                    word_need_to_recount.add(word)
-                    
-            for _, word, _ in cache:
-                if word in word_need_to_recount:
-                    cache = recount_word(cache, word, vocab_bytes_to_int, merges)
+            token1 = vocab.get(most_frequent_pair[0])
+            token2 = vocab.get(most_frequent_pair[1])
+            new_token_bytes = token1 + token2
+            new_token_id = i+256+special_tokens_length
+            
+            vocab[new_token_id] = new_token_bytes
+            vocab_bytes_to_int[new_token_bytes] = new_token_id
+            merges.append((token1, token2))
+            
+            word_count_new: dict[tuple[int, ...], int] = dict()
+            
+            for word, count in word_count.items():
+                new_word = replace_word_with_new_token(word, most_frequent_pair[0], most_frequent_pair[1], new_token_id)
+                
+                word_count_new[new_word] = word_count_new.get(new_word, 0) + count
+            
+            word_count = word_count_new
+            bytes_pair_count_new: dict[tuple[bytes, bytes], int] = get_bytes_pair_count(word_count)
+            bytes_pair_count = bytes_pair_count_new
 
     return vocab, merges
 
-def count_bytes_pairs(cache: dict[tuple[int, list[int], tuple[bytes, bytes]], int]) -> dict[tuple[bytes, bytes], int]:
-    count_dict: dict[tuple[bytes, bytes], int] = dict()
-    for _, _, bytes_pair in cache.keys:
-        if bytes_pair not in count_dict.keys:
-            count_dict[bytes_pair] = 1
-        else:
-            count_dict[bytes_pair] += 1
-
-    return count_dict
-
-def get_most_frequent_bytes_pairs(count_dict: dict[tuple[bytes, bytes], int]) -> tuple[bytes, bytes]:
-    max_count = max(count_dict, key=count_dict.get)
-    max_items = [(bytes_pair, count) for (bytes_pair, count) in count_dict.items() if count == max_count]
-
-    # Choose the lexicographically greatest bytes_pair
-    max_item = max(max_items, key=max_items[0])
+def get_bytes_pair_count(word_count: dict[tuple[int, ...], int]) -> dict[tuple[int, int], int]:
+    bytes_pair_count: dict[tuple[int, int], int] = dict()
     
-    return max_item
-
-def recount_word(cache: dict[tuple[int, list[int], tuple[bytes, bytes]], int], 
-                 word_need_to_recound: list[int],
-                 vocab_bytes_to_int: dict[bytes, int],
-                 merges: list[tuple[bytes, bytes]]) -> dict[tuple[int, list[int], tuple[bytes, bytes]], int]:
-    for chunk_id, word, bytes_pair in cache:
-        if word == word_need_to_recound:
-            cache[chunk_id, word, bytes_pair] = 0
+    for word_bytes, count in word_count.items():
+        pair_list = get_pairs_from_word(word_bytes)
+        for pair in pair_list:
+            bytes_pair_count[pair] = bytes_pair_count.get(pair, 0) + count
             
-    for merge in merges:
-        merge_int_1, merge_int_2 = vocab_bytes_to_int[merge[0]], vocab_bytes_to_int[merge[1]]
-        index = 0
-        merge_in_vocab = vocab_bytes_to_int[merge]
-        for int1, int2 in zip(word, word[1:]):
-            if int1 == merge_int_1 and int2 == merge_int_2:
-                del word[index]
-                del word[index+1]
-                
-                word.insert[index, merge_in_vocab]
+    return bytes_pair_count
+
+def get_pairs_from_word(word: tuple[int, ...]) -> list[tuple[int, int]]:
+    return [(byte1, byte2) for byte1, byte2 in zip(word, word[1:])]
+
+def get_most_frequent_pair(bytes_pair_count: dict[tuple[int, int], int], vocab: dict[int, bytes]) -> tuple[int, int]:
+    max_count = max(bytes_pair_count.values())
+    frquent_pairs = [bytes_pair for bytes_pair, count in bytes_pair_count.items() if count == max_count]
     
-    for byte_id in len(word):
-        if (chunk_id, word, (word(byte_id), word(byte_id+1))) in cache.keys:
-            cache[(chunk_id, word, (word(byte_id), word(byte_id+1)))] += 1
+    # def helper(bytes_pair: tuple[int, int]) -> tuple[str, str]:
+    #     return str(vocab.get(bytes_pair[0]) + vocab.get(bytes_pair[1]))
+    
+    return max(frquent_pairs)
+
+def replace_word_with_new_token(word: tuple[int, ...], 
+                                old_token_1:int, 
+                                old_token_2:int, 
+                                new_token: int) -> tuple[int, ...]:
+    new_word: list[int] = []
+    index = 0
+    while index < len(word):
+        if index < len(word) -1 and word[index] == old_token_1 and word[index+1] == old_token_2:
+            new_word.append(new_token)
+            index += 2
         else:
-            cache[(chunk_id, word, (word(byte_id), word(byte_id+1)))] = 1
-            
-    return cache
+            new_word.append(word[index])
+            index += 1
     
-        
-    
+    return tuple(new_word)
