@@ -1,4 +1,4 @@
-from pretokenization_example import find_chunk_boundaries
+from cs336_basics.pretokenization_example import find_chunk_boundaries
 import regex as re
 
 def train_bpe(
