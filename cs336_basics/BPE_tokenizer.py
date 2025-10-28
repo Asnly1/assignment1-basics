@@ -68,7 +68,7 @@ def train_bpe(
             vocab[new_token_id] = new_token_bytes
             merges.append((token1_bytes, token2_bytes))
             
-            word_need_to_recount: list[tuple[int, ...]] = bytes_pair_to_word.get(most_frequent_pair)
+            word_need_to_recount: set[tuple[int, ...]] = bytes_pair_to_word.get(most_frequent_pair).copy()
             
             # Delete old pairs
             for word in word_need_to_recount:
@@ -77,13 +77,16 @@ def train_bpe(
                 
                 pair_list = get_pairs_from_word(word)
                 for pair in pair_list:
-                    bytes_pair_to_word[pair].remove(word)
                     bytes_pair_count[pair] = bytes_pair_count.get(pair, 0) - count
                     if bytes_pair_count.get(pair) == 0:
                         del bytes_pair_count[pair]
+                
+                for pair in set(pair_list): # Use set to prevent remove same word multiple times
+                    bytes_pair_to_word[pair].remove(word)
+                    if not bytes_pair_to_word[pair]:
+                        del bytes_pair_to_word[pair]
             
-            # Add new pairs
-            for word in word_need_to_recount:
+                # Add new pairs
                 word = replace_word_with_new_token(word, most_frequent_pair[0], most_frequent_pair[1], new_token_id)
                 word_count[word] = count
                 
@@ -107,13 +110,15 @@ def process_chunk(
         f.seek(start)
         chunk = f.read(end - start)
         
-    local_word_count = Counter()
-    chunk_list: list[bytes] = re.split(special_tokens_pattern, chunk)
-    for chunk in chunk_list:
-        chunk = chunk.decode("utf-8")
-        for word in re.finditer(PAT, chunk):
-            word_bytes: tuple[int, ...] = tuple(word.group(0).encode("utf-8"))
-            local_word_count[word_bytes] += 1
+        local_word_count = Counter()
+        chunk_list: list[bytes] = re.split(special_tokens_pattern, chunk)
+        for chunk in chunk_list:
+            chunk = chunk.decode("utf-8")
+            for word in re.finditer(PAT, chunk):
+                word_bytes: tuple[int, ...] = tuple(word.group(0).encode("utf-8"))
+                local_word_count[word_bytes] += 1
+    
+    return local_word_count
                     
 def get_pairs_from_word(word: tuple[int, ...]) -> list[tuple[int, int]]:
     return [(byte1, byte2) for byte1, byte2 in zip(word, word[1:])]
