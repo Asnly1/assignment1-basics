@@ -1,5 +1,9 @@
 from cs336_basics.pretokenization_example import find_chunk_boundaries
 import regex as re
+import multiprocessing
+from collections import Counter
+
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 def train_bpe(
     input_path: str,
@@ -7,37 +11,32 @@ def train_bpe(
     special_tokens: list[str]
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    
     with open(input_path, "rb") as f: # read binary
         num_processes = 4
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
         
         # int : bytes
         vocab: dict[int, bytes] = {i : bytes([i]) for i in range(256)}
-        vocab_bytes_to_int: dict[bytes, int] = {bytes([i]) : i for i in range(256)}
         merges: list[tuple[bytes, bytes]] = []
         
         for i, special_token in enumerate(special_tokens):
             vocab[i+256] = special_token.encode("utf-8")
-            vocab_bytes_to_int[special_token.encode("utf-8")] = i+256
-        
-        word_count: dict[tuple[int, ...], int] = dict()
         
         special_token_bytes = [special_token.encode("utf-8") for special_token in special_tokens]
         special_tokens_pattern = b"|".join(re.escape(special_token_byte) for special_token_byte in special_token_bytes )
         
         # Pre-tokenization
-        for start, end in zip(boundaries[:-1], boundaries[1:]): # todo: parallelize
-            f.seek(start)
-            chunk = f.read(end - start)
-            chunk_list: list[bytes] = re.split(special_tokens_pattern, chunk)
-            for chunk in chunk_list:
-                chunk = chunk.decode("utf-8")
-                for word in re.finditer(PAT, chunk):
-                    word_bytes: tuple[int, ...] = tuple(word.group(0).encode("utf-8"))
-                    word_count[word_bytes] = word_count.get(word_bytes, 0) + 1
-        
+        tasks = []
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            tasks.append((input_path, start, end, special_tokens_pattern))
+            
+        with multiprocessing.Pool(processes=num_processes) as pool:
+            results = pool.starmap(process_chunk, tasks)
+            
+        word_count = Counter()
+        for local_word_count in results:
+            word_count.update(local_word_count)
+            
         # Map bytes_pair to its word  
         bytes_pair_to_word: dict[tuple[int, int], set[tuple[int, ...]]] = dict()
         # Get initial bytes_pair count
@@ -67,7 +66,6 @@ def train_bpe(
             new_token_id = i+256+special_tokens_length
             
             vocab[new_token_id] = new_token_bytes
-            vocab_bytes_to_int[new_token_bytes] = new_token_id
             merges.append((token1_bytes, token2_bytes))
             
             word_need_to_recount: list[tuple[int, ...]] = bytes_pair_to_word.get(most_frequent_pair)
@@ -99,6 +97,24 @@ def train_bpe(
 
     return vocab, merges
 
+def process_chunk(
+    input_path: str,
+    start: int,
+    end: int,
+    special_tokens_pattern: bytes
+) -> Counter:
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start)
+        
+    local_word_count = Counter()
+    chunk_list: list[bytes] = re.split(special_tokens_pattern, chunk)
+    for chunk in chunk_list:
+        chunk = chunk.decode("utf-8")
+        for word in re.finditer(PAT, chunk):
+            word_bytes: tuple[int, ...] = tuple(word.group(0).encode("utf-8"))
+            local_word_count[word_bytes] += 1
+                    
 def get_pairs_from_word(word: tuple[int, ...]) -> list[tuple[int, int]]:
     return [(byte1, byte2) for byte1, byte2 in zip(word, word[1:])]
 
