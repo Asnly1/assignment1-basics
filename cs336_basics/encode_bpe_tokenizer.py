@@ -19,11 +19,12 @@ class Tokenizer:
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
         
         self.special_tokens: list[str] | None = special_tokens
-        self.special_token_bytes = [special_token.encode("utf-8") for special_token in self.special_tokens]
-        # Plus b"(" and b")"" to capture special tokens
-        if self.special_token_bytes:
+        if self.special_tokens:
+            self.special_token_bytes = [special_token.encode("utf-8") for special_token in self.special_tokens]
+            # Plus b"(" and b")"" to capture special tokens
             self.special_tokens_pattern = b"(" + b"|".join(re.escape(special_token_byte) for special_token_byte in self.special_token_bytes) + b")"
         else:
+            self.special_token_bytes = None
             self.special_tokens_pattern = b""
     
     @classmethod
@@ -84,19 +85,23 @@ class Tokenizer:
 
     def process_chunk(self, text_bytes: bytes, start:int, end:int) -> list[str]:
         chunk: bytes = text_bytes[start:end]
-        chunk_list: list[bytes] = re.split(self.special_tokens_pattern, chunk)
+        if self.special_tokens_pattern:
+            chunk_list: list[bytes] = re.split(self.special_tokens_pattern, chunk)
+        else:
+            chunk_list: list[bytes] = [chunk]
         result = []
         
         for chunk in chunk_list:
             if not chunk:
-                continue # skip "" caused by re.split
+            # skip "" caused by re.split
+                continue 
             
             try:
                 chunk: str = chunk.decode("utf-8")
             except UnicodeDecodeError:
                 continue
             
-            if chunk in self.special_tokens:
+            if self.special_tokens is not None and chunk in self.special_tokens:
                 result.append(self.vocab_to_int[chunk.encode("utf-8")])
                 continue
             for word in re.finditer(self.PAT, chunk):
@@ -129,6 +134,10 @@ class Tokenizer:
                     for merge_pair in self.merges:
                         before_number_1, before_number_2 = self.vocab_to_int.get(merge_pair[0]), self.vocab_to_int.get(merge_pair[1])
                         new_number = self.vocab_to_int.get(merge_pair[0] + merge_pair[1])
+                        
+                        if before_number_1 is None or before_number_2 is None or new_number is None:
+                            continue
+                        
                         new_word_number: list[int] = []
                         index = 0
                         while index < len(word_number):
@@ -147,7 +156,10 @@ class Tokenizer:
     def encode_iterable(self, iterable: Iterable[str]) -> Iterable[int]:
         for item_line in iterable:
             item_line = item_line.encode("utf-8")
-            chunk_list: list[bytes] = re.split(self.special_tokens_pattern, item_line)
+            if self.special_tokens_pattern:
+                chunk_list: list[bytes] = re.split(self.special_tokens_pattern, item_line)
+            else:
+                chunk_list: list[bytes] = [item_line]
             result = []
             
             for chunk in chunk_list:
@@ -158,7 +170,7 @@ class Tokenizer:
                 except UnicodeDecodeError:
                     continue
                 
-                if chunk in self.special_tokens:
+                if self.special_tokens is not None and chunk in self.special_tokens:
                     result.append(self.vocab_to_int[chunk.encode("utf-8")])
                     continue
                 for word in re.finditer(self.PAT, chunk):
@@ -176,6 +188,10 @@ class Tokenizer:
                     for merge_pair in self.merges:
                         before_number_1, before_number_2 = self.vocab_to_int.get(merge_pair[0]), self.vocab_to_int.get(merge_pair[1])
                         new_number = self.vocab_to_int.get(merge_pair[0] + merge_pair[1])
+                                                
+                        if before_number_1 is None or before_number_2 is None or new_number is None:
+                            continue
+                        
                         new_word_number: list[int] = []
                         index = 0
                         while index < len(word_number):
