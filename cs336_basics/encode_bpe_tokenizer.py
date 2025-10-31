@@ -129,7 +129,8 @@ class Tokenizer:
                 if isinstance(word, int):
                     final_result.append(word)
                 if isinstance(word, str):
-                    word_number: list[int] = list(word.encode("utf-8"))
+                    word_bytes = word.encode("utf-8")
+                    word_number: list[int] = list(self.vocab_to_int[word_bytes[i:i+1]] for i in range(len(word_bytes)))
                     # merge
                     for merge_pair in self.merges:
                         before_number_1, before_number_2 = self.vocab_to_int.get(merge_pair[0]), self.vocab_to_int.get(merge_pair[1])
@@ -183,7 +184,8 @@ class Tokenizer:
                 if isinstance(word, int):
                     final_result.append(word)
                 if isinstance(word, str):
-                    word_number: list[int] = list(word.encode("utf-8"))
+                    word_bytes = word.encode("utf-8")
+                    word_number: list[int] = list(self.vocab_to_int[word_bytes[i:i+1]] for i in range(len(word_bytes)))
                     # merge
                     for merge_pair in self.merges:
                         before_number_1, before_number_2 = self.vocab_to_int.get(merge_pair[0]), self.vocab_to_int.get(merge_pair[1])
