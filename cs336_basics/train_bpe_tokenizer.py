@@ -23,7 +23,7 @@ def train_bpe(
             vocab[i+256] = special_token.encode("utf-8")
         
         special_token_bytes = [special_token.encode("utf-8") for special_token in special_tokens]
-        special_tokens_pattern = b"|".join(re.escape(special_token_byte) for special_token_byte in special_token_bytes )
+        special_tokens_pattern = b"|".join(re.escape(special_token_byte) for special_token_byte in special_token_bytes)
         
         # Pre-tokenization
         tasks = []
