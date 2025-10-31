@@ -115,7 +115,7 @@ def process_chunk(
         for chunk in chunk_list:
             chunk = chunk.decode("utf-8")
             for word in re.finditer(PAT, chunk):
-                word_bytes: tuple[int, ...] = tuple(word.group(0).encode("utf-8"))
+                word_bytes: tuple[int, ...] = tuple(word.group(0).encode("utf-8")) # tuple turns bytes into int
                 local_word_count[word_bytes] += 1
     
     return local_word_count
