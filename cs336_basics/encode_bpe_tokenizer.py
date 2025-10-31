@@ -3,6 +3,7 @@ from pathlib import Path
 import pickle
 from collections.abc import Iterable
 import regex as re
+import bisect
 
 class Tokenizer:
     def __init__(self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None):
@@ -20,12 +21,17 @@ class Tokenizer:
         
         self.special_tokens: list[str] | None = special_tokens
         if self.special_tokens:
-            self.special_token_bytes = [special_token.encode("utf-8") for special_token in self.special_tokens]
+            sorted_special_tokens = sorted(special_tokens, key=len, reverse=True)
+            self.special_token_bytes = [special_token.encode("utf-8") for special_token in sorted_special_tokens]
+            self.longest_special_token_len = len(self.special_token_bytes[0])
             # Plus b"(" and b")"" to capture special tokens
             self.special_tokens_pattern = b"(" + b"|".join(re.escape(special_token_byte) for special_token_byte in self.special_token_bytes) + b")"
+            self.compile_special_tokens_pattern = re.compile(self.special_tokens_pattern)
         else:
+            self.longest_special_token_len = 0
             self.special_token_bytes = None
             self.special_tokens_pattern = b""
+            self.compile_special_tokens_pattern = re.compile(self.special_tokens_pattern)
     
     @classmethod
     def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
@@ -44,14 +50,7 @@ class Tokenizer:
         self,
         file: bytes,
         desired_num_chunks: int,
-        split_special_token: bytes,
     ) -> list[int]:
-        """
-        Chunk the file into parts that can be counted independently.
-        May return fewer chunks if the boundaries end up overlapping.
-        """
-        assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
-
         file_size = len(file)
         chunk_size = file_size // desired_num_chunks
 
@@ -59,34 +58,43 @@ class Tokenizer:
         # Chunks start on previous index, don't include last index
         chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
         chunk_boundaries[-1] = file_size
+        
+        # pre-calculate the positions of all special tokens
+        spans = [(m.start(), m.end()) for m in self.compile_special_tokens_pattern.finditer(file)]
+        edges = []
+        for s, e in spans:
+            edges.append(s)
+            edges.append(e)
+        edges.sort()
+        
+        def snap(pos: int) -> int:
+            # if pos falls into a span, snap it to the nearest side
+            for s, e in spans:
+                if s < pos < e:
+                    return s if pos - s <= e - pos else e
 
-        mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+            # if pos does not fall into a span, choose the nearest side
+            i = bisect.bisect_left(edges, pos)
+            candidates = [] # one or two candidates
+            if i < len(edges):
+                candidates.append(edges[i]) # the smallest position that is bigger than pos
+            if i > 0:
+                candidates.append(edges[i - 1]) # the greatest position that is smaller than pos
+            if not candidates:
+                return pos
+            # first to compare the distance between pos and candidate
+            # if the distance is the same, then choose the smaller position
+            return min(candidates, key=lambda b: (abs(b - pos), b)) 
 
         for bi in range(1, len(chunk_boundaries) - 1):
-            initial_position = chunk_boundaries[bi]
-            end_position = initial_position + mini_chunk_size
-            while True:
-                mini_chunk = file[initial_position:end_position]
+            chunk_boundaries[bi] = snap(chunk_boundaries[bi])
 
-                # If EOF, this boundary should be at the end of the file
-                if mini_chunk == b"":
-                    chunk_boundaries[bi] = file_size
-                    break
-
-                # Find the special token in the mini chunk
-                found_at = mini_chunk.find(split_special_token)
-                if found_at != -1:
-                    chunk_boundaries[bi] = initial_position + found_at
-                    break
-                initial_position += mini_chunk_size
-
-        # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
-        return sorted(set(chunk_boundaries))
-
+        return chunk_boundaries
+            
     def process_chunk(self, text_bytes: bytes, start:int, end:int) -> list[str]:
         chunk: bytes = text_bytes[start:end]
         if self.special_tokens_pattern:
-            chunk_list: list[bytes] = re.split(self.special_tokens_pattern, chunk)
+            chunk_list: list[bytes] = re.split(self.compile_special_tokens_pattern, chunk)
         else:
             chunk_list: list[bytes] = [chunk]
         result = []
@@ -96,11 +104,7 @@ class Tokenizer:
             # skip "" caused by re.split
                 continue 
             
-            try:
-                chunk: str = chunk.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-            
+            chunk: str = chunk.decode("utf-8", errors='replace')
             if self.special_tokens is not None and chunk in self.special_tokens:
                 result.append(self.vocab_to_int[chunk.encode("utf-8")])
                 continue
@@ -113,7 +117,7 @@ class Tokenizer:
     def encode(self, text: str) -> list[int]:
         text_bytes: bytes = text.encode("utf-8")
         num_processes = 4
-        boundaries = self.find_chunk_boundaries(text_bytes, num_processes, b"<|endoftext|>")
+        boundaries = self.find_chunk_boundaries(text_bytes, num_processes)
         tasks = []
         
         for start, end in zip(boundaries[:-1], boundaries[1:]):
@@ -158,7 +162,7 @@ class Tokenizer:
         for item_line in iterable:
             item_line = item_line.encode("utf-8")
             if self.special_tokens_pattern:
-                chunk_list: list[bytes] = re.split(self.special_tokens_pattern, item_line)
+                chunk_list: list[bytes] = re.split(self.compile_special_tokens_pattern, item_line)
             else:
                 chunk_list: list[bytes] = [item_line]
             result = []
@@ -166,10 +170,8 @@ class Tokenizer:
             for chunk in chunk_list:
                 if not chunk:
                     continue
-                try:
-                    chunk: str = chunk.decode("utf-8")
-                except UnicodeDecodeError:
-                    continue
+                
+                chunk: str = chunk.decode("utf-8", errors='replace')
                 
                 if self.special_tokens is not None and chunk in self.special_tokens:
                     result.append(self.vocab_to_int[chunk.encode("utf-8")])
